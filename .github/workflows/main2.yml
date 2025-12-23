@@ -1,0 +1,134 @@
+name: Build Vue & Package Windows EXE
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # 手动触发
+
+jobs:
+  build:
+    runs-on: windows-latest # 必须 Windows 环境打包 EXE
+    steps:
+      # 步骤 1：拉取代码（确保完整）
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 步骤 2：配置 Node.js 环境（匹配项目要求，建议 16+/18+）
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm' # 缓存 npm 依赖，加速构建
+
+      # 步骤 3：安装 Vue 项目依赖
+      - name: Install Vue dependencies
+        run: |
+          npm install # 若项目用 yarn，改为 yarn install
+
+      # 步骤 4：编译 Vue 项目为静态文件（默认输出到 dist 目录）
+      - name: Build Vue project
+        run: |
+          npm run build # 对应 package.json 中的 build 脚本（关键）
+
+      # 步骤 5：配置 Electron 封装静态文件（核心：将 dist 封装为 EXE）
+      # 先初始化 Electron 项目（若项目未集成 Electron）
+      - name: Setup Electron
+        run: |
+          # 1. 安装 Electron 依赖（项目根目录）
+          npm install electron electron-builder --save-dev
+          # 2. 创建 Electron 主进程文件（main.js）
+          "@" | Out-File -FilePath main.js -Encoding utf8
+          @"
+          const { app, BrowserWindow } = require('electron');
+          const path = require('path');
+          const url = require('url');
+
+          let mainWindow;
+
+          function createWindow() {
+            // 创建窗口
+            mainWindow = new BrowserWindow({
+              width: 800,
+              height: 600,
+              webPreferences: {
+                nodeIntegration: true,
+                contextIsolation: false
+              }
+            });
+
+            // 加载 Vue 打包后的静态文件（dist/index.html）
+            mainWindow.loadURL(
+              url.format({
+                pathname: path.join(__dirname, 'dist/index.html'),
+                protocol: 'file:',
+                slashes: true
+              })
+            );
+
+            // 关闭窗口时销毁
+            mainWindow.on('closed', () => {
+              mainWindow = null;
+            });
+          }
+
+          // Electron 就绪后创建窗口
+          app.on('ready', createWindow);
+
+          // 所有窗口关闭时退出
+          app.on('window-all-closed', () => {
+            if (process.platform !== 'darwin') {
+              app.quit();
+            }
+          });
+
+          app.on('activate', () => {
+            if (mainWindow === null) {
+              createWindow();
+            }
+          });
+          "@ | Out-File -FilePath main.js -Encoding utf8
+
+          # 3. 修改 package.json，添加 Electron 配置
+          $packageJson = Get-Content package.json -Raw | ConvertFrom-Json
+          $packageJson.main = "main.js"
+          $packageJson.scripts += @{
+            "electron:build" = "electron-builder --win --x64"
+          }
+          $packageJson | ConvertTo-Json -Depth 10 | Out-File -FilePath package.json -Encoding utf8
+
+          # 4. 添加 electron-builder 配置（打包 EXE 相关）
+          $packageJson.build = @{
+            "appId" = "com.kotoyuuko.kazzword"
+            "win" = @{
+              "target" = "nsis" # 生成安装包，也可改为 "portable" 生成免安装 EXE
+              "icon" = "build/icons/icon.ico" # 可选：自定义图标
+            }
+            "nsis" = @{
+              "oneClick" = $true # 一键安装
+              "allowToChangeInstallationDirectory" = $false
+            }
+            "files" = @[
+              "dist/**/*",
+              "main.js",
+              "node_modules/**/*"
+            ]
+            "directories" = @{
+              "output" = "electron-dist"
+            }
+          }
+          $packageJson | ConvertTo-Json -Depth 10 | Out-File -FilePath package.json -Encoding utf8
+
+      # 步骤 6：打包 Electron 为 Windows EXE
+      - name: Build Electron EXE
+        run: |
+          npm run electron:build
+
+      # 步骤 7：上传 EXE 产物（免安装版/安装包）
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kazzword-windows-exe
+          path: |
+            electron-dist/*.exe # 输出的 EXE 文件
+            electron-dist/*.zip # 若有压缩包也上传
