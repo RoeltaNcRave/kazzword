@@ -1,0 +1,79 @@
+name: Build & Package EXE for Windows
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest # 必须用 Windows 环境打包 EXE
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build JAR with Maven
+        run: ./mvnw clean package -DskipTests
+
+      # 步骤 1：下载 Launch4j 到 GitHub Actions 环境
+      - name: Download Launch4j
+        run: |
+          curl -L https://sourceforge.net/projects/launch4j/files/launch4j-3/3.50/launch4j-3.50-win32.zip/download -o launch4j.zip
+          Expand-Archive launch4j.zip -DestinationPath ./launch4j
+
+      # 步骤 2：创建 Launch4j 配置文件（launch4j.xml）
+      - name: Create Launch4j config
+        run: |
+          @"
+          <launch4jConfig>
+            <dontWrapJar>false</dontWrapJar>
+            <headerType>gui</headerType>
+            <jar>target\kazzword.jar</jar>
+            <outfile>kazzword.exe</outfile>
+            <errTitle></errTitle>
+            <cmdLine></cmdLine>
+            <chdir>.</chdir>
+            <priority>normal</priority>
+            <downloadUrl>https://adoptium.net/</downloadUrl>
+            <supportUrl></supportUrl>
+            <stayAlive>false</stayAlive>
+            <restartOnCrash>false</restartOnCrash>
+            <manifest></manifest>
+            <icon></icon>
+            <jre>
+              <path>jre17</path>
+              <minVersion>17</minVersion>
+              <maxVersion></maxVersion>
+              <jdkPreference>preferJre</jdkPreference>
+              <runtimeBits>64/32</runtimeBits>
+            </jre>
+          </launch4jConfig>
+          "@ | Out-File -FilePath launch4j.xml -Encoding utf8
+
+      # 步骤 3：下载 JRE 并打包 EXE
+      - name: Package EXE with Launch4j
+        run: |
+          # 下载 JRE 17（Windows 64 位）
+          curl -L https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.9%2B9/OpenJDK17U-jre_x64_windows_hotspot_17.0.9_9.zip -o jre17.zip
+          Expand-Archive jre17.zip -DestinationPath .
+          Rename-Item -Path .\jdk-17.0.9+9-jre -NewName jre17
+
+          # 运行 Launch4j 生成 EXE
+          .\launch4j\launch4j-3.50-win32\launch4jc.exe launch4j.xml
+
+      # 步骤 4：上传 EXE 和 JRE 包
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kazzword-windows-exe
+          path: |
+            kazzword.exe
+            jre17/
