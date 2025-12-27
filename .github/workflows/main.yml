@@ -1,79 +1,121 @@
-name: Build & Package EXE for Windows
-
+name: Build Vue (Yarn) & Package Windows EXE
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: # 手动触发
 
 jobs:
   build:
-    runs-on: windows-latest # 必须用 Windows 环境打包 EXE
-
+    runs-on: windows-latest
     steps:
+      # 步骤 1：拉取仓库代码（确保完整）
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: 'maven'
+          fetch-depth: 0 # 拉取完整历史，避免依赖/文件缺失
 
-      - name: Build JAR with Maven
-        run: ./mvnw clean package -DskipTests
+      # 步骤 2：配置 Node.js + Yarn（核心：指定 Yarn 版本）
+      - name: Set up Node.js and Yarn
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18' # 匹配项目兼容的 Node 版本（Vue 3 建议 14+，Vue 2 建议 12+）
+          cache: 'yarn' # 缓存 Yarn 依赖，加速后续构建
 
-      # 步骤 1：下载 Launch4j 到 GitHub Actions 环境
-      - name: Download Launch4j
+      # 步骤 3：切换 Yarn 源（可选，解决国内下载慢）
+      - name: Set Yarn registry (taobao)
         run: |
-          curl -L https://sourceforge.net/projects/launch4j/files/launch4j-3/3.50/launch4j-3.50-win32.zip/download -o launch4j.zip
-          Expand-Archive launch4j.zip -DestinationPath ./launch4j
+          yarn config set registry https://registry.npm.taobao.org
+          yarn config set electron_mirror https://npmmirror.com/mirrors/electron/ # 加速 Electron 下载
 
-      # 步骤 2：创建 Launch4j 配置文件（launch4j.xml）
-      - name: Create Launch4j config
+      # 步骤 4：安装项目依赖（Yarn 核心命令）
+      - name: Install dependencies with Yarn
+        run: yarn install --frozen-lockfile # --frozen-lockfile 锁定依赖版本，避免不一致
+
+      # 步骤 5：编译 Vue 为静态文件（执行 Yarn 脚本）
+      - name: Build Vue project (Yarn)
+        run: yarn run build # 对应 package.json 中的 "build" 脚本
+
+      # 步骤 6：配置 Electron（封装静态文件为 EXE）
+      - name: Setup Electron (Yarn)
         run: |
+          # 安装 Electron 相关依赖（Yarn add）
+          yarn add electron electron-builder --dev
+          
+          # 创建 Electron 主进程文件 main.js
           @"
-          <launch4jConfig>
-            <dontWrapJar>false</dontWrapJar>
-            <headerType>gui</headerType>
-            <jar>target\kazzword.jar</jar>
-            <outfile>kazzword.exe</outfile>
-            <errTitle></errTitle>
-            <cmdLine></cmdLine>
-            <chdir>.</chdir>
-            <priority>normal</priority>
-            <downloadUrl>https://adoptium.net/</downloadUrl>
-            <supportUrl></supportUrl>
-            <stayAlive>false</stayAlive>
-            <restartOnCrash>false</restartOnCrash>
-            <manifest></manifest>
-            <icon></icon>
-            <jre>
-              <path>jre17</path>
-              <minVersion>17</minVersion>
-              <maxVersion></maxVersion>
-              <jdkPreference>preferJre</jdkPreference>
-              <runtimeBits>64/32</runtimeBits>
-            </jre>
-          </launch4jConfig>
-          "@ | Out-File -FilePath launch4j.xml -Encoding utf8
+          const { app, BrowserWindow } = require('electron');
+          const path = require('path');
+          const url = require('url');
 
-      # 步骤 3：下载 JRE 并打包 EXE
-      - name: Package EXE with Launch4j
-        run: |
-          # 下载 JRE 17（Windows 64 位）
-          curl -L https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.9%2B9/OpenJDK17U-jre_x64_windows_hotspot_17.0.9_9.zip -o jre17.zip
-          Expand-Archive jre17.zip -DestinationPath .
-          Rename-Item -Path .\jdk-17.0.9+9-jre -NewName jre17
+          let mainWindow;
 
-          # 运行 Launch4j 生成 EXE
-          .\launch4j\launch4j-3.50-win32\launch4jc.exe launch4j.xml
+          function createWindow() {
+            mainWindow = new BrowserWindow({
+              width: 800,
+              height: 600,
+              webPreferences: {
+                nodeIntegration: true,
+                contextIsolation: false
+              }
+            });
 
-      # 步骤 4：上传 EXE 和 JRE 包
+            // 加载 Vue 打包后的 dist/index.html
+            mainWindow.loadURL(
+              url.format({
+                pathname: path.join(__dirname, 'dist/index.html'),
+                protocol: 'file:',
+                slashes: true
+              })
+            );
+
+            // 打开开发者工具（调试用，上线可注释）
+            // mainWindow.webContents.openDevTools();
+
+            mainWindow.on('closed', () => {
+              mainWindow = null;
+            });
+          }
+
+          app.on('ready', createWindow);
+          app.on('window-all-closed', () => {
+            if (process.platform !== 'darwin') app.quit();
+          });
+          app.on('activate', () => {
+            if (mainWindow === null) createWindow();
+          });
+          "@ | Out-File -FilePath main.js -Encoding utf8
+
+          # 修改 package.json（添加 Electron 配置）
+          $packageJson = Get-Content package.json -Raw | ConvertFrom-Json
+          # 设置 Electron 入口文件
+          $packageJson.main = "main.js"
+          # 添加 Electron 打包脚本
+          $packageJson.scripts += @{ "electron:build" = "electron-builder --win --x64" }
+          # 添加 electron-builder 打包配置
+          $packageJson | Add-Member -NotePropertyName "build" -NotePropertyValue @{
+            appId = "com.kotoyuuko.kazzword"
+            win = @{
+              target = "portable" # 生成免安装单文件 EXE（推荐），也可改为 "nsis" 生成安装包
+              icon = "src/assets/icon.ico" # 可选：替换为项目实际图标路径（.ico 格式）
+            }
+            files = @("dist/**/*", "main.js", "node_modules/**/*")
+            directories = @{ output = "electron-dist" }
+          } -Force
+          # 保存修改后的 package.json
+          $packageJson | ConvertTo-Json -Depth 10 | Out-File -FilePath package.json -Encoding utf8
+
+      # 步骤 7：打包 Electron 为 Windows EXE（Yarn 执行脚本）
+      - name: Build Electron EXE (Yarn)
+        run: yarn run electron:build
+
+      # 步骤 8：上传 EXE 产物
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
           name: kazzword-windows-exe
           path: |
-            kazzword.exe
-            jre17/
+            electron-dist/*.exe # 免安装 EXE 文件
+            electron-dist/*.zip # 若有压缩包也上传
+            electron-dist/*.nsis.exe # 若选 nsis 则上传安装包
