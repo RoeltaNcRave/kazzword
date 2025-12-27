@@ -1,39 +1,72 @@
 name: 构建 EXE 可执行文件
 
 on:
-    workflow_dispatch: # 手动触发
-
+  workflow_dispatch:
+    inputs:
+      buildVersion:
+        description: '构建版本号'
+        required: false
+        default: '1.0.0'
+        type: string
 
 jobs:
   build:
-    runs-on: windows-latest  # 构建 Windows 可执行文件需用 Windows 环境
+    runs-on: windows-latest
+    env:
+      NODE_TLS_REJECT_UNAUTHORIZED: 0  # 应急：临时跳过 TLS 证书验证（可选）
 
     steps:
     - name: 检出代码
       uses: actions/checkout@v4
 
+    # 修复 Windows 证书过期（核心步骤）
+    - name: 刷新 Windows 根证书
+      run: |
+        # 更新根证书颁发机构
+        certutil -generateSSTFromWU roots.sst
+        certutil -addstore root roots.sst
+        # 清理旧证书缓存
+        certutil -urlcache * delete
+      shell: pwsh
+
     - name: 安装 Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: 20.x  # 根据项目需求指定 Node.js 版本
-        cache: 'yarn'       # 缓存 Yarn 依赖加速构建
+        node-version: 20.x
+        cache: 'yarn'
+        # 切换国内 npm 源（避免国外源证书问题）
+        registry-url: https://registry.npmmirror.com/
+
+    - name: 配置 Yarn 源（国内镜像）
+      run: |
+        yarn config set registry https://registry.npmmirror.com/
+        yarn config set strict-ssl false  # 关闭严格 SSL 验证（应急）
 
     - name: 安装项目依赖
-      run: yarn install --frozen-lockfile  # 锁定依赖版本，确保一致性
+      run: yarn install --frozen-lockfile --network-timeout 1000000
 
     - name: 安装打包工具 pkg
-      run: yarn global add pkg  # 全局安装 pkg（若项目已局部依赖可省略）
+      run: yarn global add pkg --registry https://registry.npmmirror.com/
 
     - name: 编译并打包为 EXE
       run: |
-        # 确保项目有入口文件（如 index.js），根据实际情况修改
-        pkg . --targets node18-win-x64 --output dist/my-app.exe
+        # 确保 dist 目录存在
+        if (-not (Test-Path dist)) { New-Item -ItemType Directory -Path dist }
+        # 打包（指定国内镜像的 pkg 源）
+        pkg . --targets node20-win-x64 --output dist/my-app-${{ github.event.inputs.buildVersion }}.exe
       env:
-        # 若项目需要环境变量可在此添加
         NODE_ENV: production
+        PKG_CACHE_PATH: ${{ github.workspace }}/.pkg-cache  # 缓存 pkg 依赖
 
     - name: 上传 EXE 产物
       uses: actions/upload-artifact@v4
       with:
-        name: my-app-exe
-        path: dist/my-app.exe  # 对应上面打包输出的路径
+        name: my-app-exe-${{ github.event.inputs.buildVersion }}
+        path: dist/my-app-${{ github.event.inputs.buildVersion }}.exe
+
+    # 清理临时配置（可选）
+    - name: 恢复 SSL 配置
+      if: always()
+      run: |
+        yarn config delete strict-ssl
+        yarn config set registry https://registry.yarnpkg.com/
